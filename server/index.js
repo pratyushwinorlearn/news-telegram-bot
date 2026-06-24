@@ -114,3 +114,98 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
 app.listen(PORT, () => {
   console.log(`OSINT news server running on http://localhost:${PORT}`);
 });
+// Add these helper mappings at the top of your backend file
+const GENRES = {
+  politics: "🏛️ Politics & National",
+  business: "💼 Business",
+  technology: "💻 Tech & Gadgets",
+  sports: "⚽ Sports",
+  entertainment: "🎬 Entertainment",
+  health: "🏥 Health",
+  world: "🌐 World News"
+};
+
+// 1. The main Webhook handler endpoint
+app.post("/api/telegram-webhook", async (req, res) => {
+  // Always acknowledge the request immediately to Telegram
+  res.sendStatus(200);
+
+  const { message, callback_query } = req.body;
+
+  // Case A: Handling normal text messages or mentions
+  if (message && message.text) {
+    const chatId = message.chat.id;
+    const text = message.text.toLowerCase();
+
+    // Check if user says hello, triggers a command, or tags the bot
+    if (text.includes("hello") || text.includes("hi") || text.startsWith("/") || text.includes("bot")) {
+      await sendGenreMenu(chatId);
+    }
+  }
+
+  // Case B: Handling interactive button clicks
+  if (callback_query) {
+    const chatId = callback_query.message.chat.id;
+    const category = callback_query.data; // This is the category value passed by the button
+
+    // Stop the loading spinner on the user's Telegram screen
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callback_query.id })
+    });
+
+    // Send a loading message or directly fetch the news
+    await sendCategoryNews(chatId, category);
+  }
+});
+
+// Helper Function: Sends the interactive category buttons
+async function sendGenreMenu(chatId) {
+  const keyboard = {
+    inline_keyboard: Object.entries(GENRES).map(([key, label]) => [
+      { text: label, callback_data: key }
+    ])
+  };
+
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: "Select a genre below to see the latest headlines:",
+      reply_markup: keyboard
+    })
+  });
+}
+
+// Helper Function: Fetches news and prints it out dynamically
+async function sendCategoryNews(chatId, category) {
+  try {
+    const newsRes = await fetch(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&category=${category}&language=en`);
+    const data = await newsRes.json();
+
+    if (!data.results || data.results.length === 0) {
+      return await sendMessage(chatId, `No recent headlines found for ${GENRES[category]}.`);
+    }
+
+    // Build message string with top 5 articles
+    let textMessage = `*🔥 Top Headlines in ${GENRES[category]}* \n\n`;
+    data.results.slice(0, 5).forEach((article, index) => {
+      textMessage += `${index + 1}. [${article.title}](${article.link})\n\n`;
+    });
+
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: textMessage,
+        parse_mode: "Markdown",
+        disable_web_page_preview: true
+      })
+    });
+  } catch (err) {
+    console.error("Error handling on-demand news:", err);
+  }
+}
