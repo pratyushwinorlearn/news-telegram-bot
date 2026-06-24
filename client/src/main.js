@@ -116,7 +116,7 @@ function updateLoadMoreVisibility(category) {
 async function fetchPage(category, page) {
   const params = new URLSearchParams({ category });
   if (page) params.set("page", page);
-  const res = await fetch(`/api/news?${params.toString()}`);
+  const res = await fetch(`https://news-telegram-bot-39hv.onrender.com/api/news?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data.error || "Failed to load news");
