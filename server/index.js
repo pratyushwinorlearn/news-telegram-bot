@@ -180,32 +180,52 @@ async function sendGenreMenu(chatId) {
 }
 
 // Helper Function: Fetches news and prints it out dynamically
+// Hardened helper function to handle category news safely via HTML
 async function sendCategoryNews(chatId, category) {
   try {
     const newsRes = await fetch(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&category=${category}&language=en`);
     const data = await newsRes.json();
 
-    if (!data.results || data.results.length === 0) {
-      return await sendMessage(chatId, `No recent headlines found for ${GENRES[category]}.`);
+    // 1. Safe check if results exist and have items
+    if (!data || !data.results || data.results.length === 0) {
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: `• No recent headlines found for this category right now.`
+        })
+      });
+      return;
     }
 
-    // Build message string with top 5 articles
-    let textMessage = `*🔥 Top Headlines in ${GENRES[category]}* \n\n`;
+    // 2. Build the message clean using HTML formatting (much safer than Markdown)
+    let textMessage = `<b>🔥 Top Headlines in ${GENRES[category] || category}</b>\n\n`;
+    
     data.results.slice(0, 5).forEach((article, index) => {
-      textMessage += `${index + 1}. [${article.title}](${article.link})\n\n`;
+      // Clean up the title to prevent basic HTML breaks
+      const cleanTitle = article.title.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      textMessage += `${index + 1}. <a href="${article.link}">${cleanTitle}</a>\n\n`;
     });
 
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    // 3. Send via HTML parse mode
+    const telegramRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
         text: textMessage,
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         disable_web_page_preview: true
       })
     });
+
+    const telegramData = await telegramRes.json();
+    if (!telegramData.ok) {
+      console.error("Telegram API rejection payload:", telegramData);
+    }
+
   } catch (err) {
-    console.error("Error handling on-demand news:", err);
+    console.error("Critical error in sendCategoryNews process:", err);
   }
 }
