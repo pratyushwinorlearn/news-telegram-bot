@@ -7,7 +7,10 @@ import cron from "node-cron";
 dotenv.config();
 
 const app = express();
+
+// 🏛️ Middleware Setup (Crucial order for processing requests)
 app.use(cors());
+app.use(express.json()); // 🔥 FIX: This parses incoming JSON from Telegram webhooks!
 
 const PORT = process.env.PORT || 3001;
 const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY;
@@ -19,14 +22,23 @@ if (!NEWSDATA_API_KEY) {
   process.exit(1);
 }
 
-// Simple in-memory cache so multiple desk members hitting the same category
-// within a few minutes don't each burn a separate NewsData.io request.
-const cache = new Map(); // key: `${category}:${page||''}` -> { data, fetchedAt }
+// Global category mapping for Telegram interactive menus
+const GENRES = {
+  politics: "🏛️ Politics & National",
+  business: "💼 Business",
+  technology: "💻 Tech & Gadgets",
+  sports: "⚽ Sports",
+  entertainment: "🎬 Entertainment",
+  health: "🏥 Health",
+  world: "🌐 World News"
+};
+
+// Simple in-memory cache to prevent burning up upstream API limits
+const cache = new Map(); 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
- * Fetches one category page from NewsData.io, with caching. Used both by the
- * /api/news route (for the dashboard) and the Telegram digest job (below).
+ * Fetches one category page from NewsData.io, with caching.
  */
 export async function fetchNewsCategory(category, page = null) {
   const cacheKey = `${category}:${page || ""}`;
@@ -61,13 +73,10 @@ export async function fetchNewsCategory(category, page = null) {
   return payload;
 }
 
-/**
- * GET /api/news?category=politics&page=<nextPage token, optional>
- *
- * The frontend never sees the NewsData.io key — this server holds it via
- * process.env.NEWSDATA_API_KEY (loaded from server/.env, which is gitignored)
- * and is the only thing that talks to newsdata.io directly.
- */
+/* =========================================
+   CORE DASHBOARD API ROUTES
+   ========================================= */
+
 app.get("/api/news", async (req, res) => {
   const { category, page } = req.query;
 
@@ -86,17 +95,127 @@ app.get("/api/news", async (req, res) => {
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-// Manual trigger — useful for testing the digest without waiting for the
-// scheduled time, or for a "send now" button later if you want one.
 app.post("/api/digest/send-now", async (req, res) => {
   const { sendDailyDigest } = await import("./telegram.js");
   const result = await sendDailyDigest();
   res.status(result.ok ? 200 : 502).json(result);
 });
 
-// Scheduled digest — runs automatically, no one needs to click anything.
-// Default: every day at 8:00 AM IST. Change the cron expression in .env
-// (DIGEST_CRON_SCHEDULE) if the desk wants a different time.
+/* =========================================
+   TELEGRAM INTERACTIVE WEBHOOK HANDLING
+   ========================================= */
+
+// The main Webhook handler endpoint
+app.post("/api/telegram-webhook", async (req, res) => {
+  // Always acknowledge the request immediately to Telegram
+  res.sendStatus(200);
+
+  try {
+    const { message, callback_query } = req.body;
+
+    // Case A: Handling normal text messages or mentions
+    if (message && message.text) {
+      const chatId = message.chat.id;
+      const text = message.text.toLowerCase();
+
+      // Check if user says hello, triggers a command, or tags the bot
+      if (text.includes("hello") || text.includes("hi") || text.startsWith("/") || text.includes("bot")) {
+        await sendGenreMenu(chatId);
+      }
+    }
+
+    // Case B: Handling interactive button clicks
+    if (callback_query) {
+      const chatId = callback_query.message.chat.id;
+      const category = callback_query.data;
+
+      // Stop the loading spinner on the user's Telegram screen
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callback_query_id: callback_query.id })
+      });
+
+      // Send the category news via HTML
+      await sendCategoryNews(chatId, category);
+    }
+  } catch (error) {
+    console.error("Error processing incoming webhook:", error);
+  }
+});
+
+// Helper Function: Sends the interactive category buttons
+async function sendGenreMenu(chatId) {
+  try {
+    const keyboard = {
+      inline_keyboard: Object.entries(GENRES).map(([key, label]) => [
+        { text: label, callback_data: key }
+      ])
+    };
+
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: "Select a genre below to see the latest headlines:",
+        reply_markup: keyboard
+      })
+    });
+  } catch (err) {
+    console.error("Error sending genre menu:", err);
+  }
+}
+
+// Helper Function: Fetches news and prints it out dynamically via safe HTML format
+async function sendCategoryNews(chatId, category) {
+  try {
+    const newsRes = await fetch(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&category=${category}&language=en`);
+    const data = await newsRes.json();
+
+    if (!data || !data.results || data.results.length === 0) {
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: `• No recent headlines found for this category right now.`
+        })
+      });
+      return;
+    }
+
+    let textMessage = `<b>🔥 Top Headlines in ${GENRES[category] || category}</b>\n\n`;
+    
+    data.results.slice(0, 5).forEach((article, index) => {
+      const cleanTitle = article.title.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      textMessage += `${index + 1}. <a href="${article.link}">${cleanTitle}</a>\n\n`;
+    });
+
+    const telegramRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: textMessage,
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      })
+    });
+
+    const telegramData = await telegramRes.json();
+    if (!telegramData.ok) {
+      console.error("Telegram API rejection payload:", telegramData);
+    }
+  } catch (err) {
+    console.error("Critical error in sendCategoryNews process:", err);
+  }
+}
+
+/* =========================================
+   CHRON JOB TIMERS & SERVER INITIALIZATION
+   ========================================= */
+
 const DIGEST_CRON_SCHEDULE = process.env.DIGEST_CRON_SCHEDULE || "0 8 * * *";
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
   cron.schedule(DIGEST_CRON_SCHEDULE, async () => {
@@ -114,118 +233,3 @@ if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
 app.listen(PORT, () => {
   console.log(`OSINT news server running on http://localhost:${PORT}`);
 });
-// Add these helper mappings at the top of your backend file
-const GENRES = {
-  politics: "🏛️ Politics & National",
-  business: "💼 Business",
-  technology: "💻 Tech & Gadgets",
-  sports: "⚽ Sports",
-  entertainment: "🎬 Entertainment",
-  health: "🏥 Health",
-  world: "🌐 World News"
-};
-
-// 1. The main Webhook handler endpoint
-app.post("/api/telegram-webhook", async (req, res) => {
-  // Always acknowledge the request immediately to Telegram
-  res.sendStatus(200);
-
-  const { message, callback_query } = req.body;
-
-  // Case A: Handling normal text messages or mentions
-  if (message && message.text) {
-    const chatId = message.chat.id;
-    const text = message.text.toLowerCase();
-
-    // Check if user says hello, triggers a command, or tags the bot
-    if (text.includes("hello") || text.includes("hi") || text.startsWith("/") || text.includes("bot")) {
-      await sendGenreMenu(chatId);
-    }
-  }
-
-  // Case B: Handling interactive button clicks
-  if (callback_query) {
-    const chatId = callback_query.message.chat.id;
-    const category = callback_query.data; // This is the category value passed by the button
-
-    // Stop the loading spinner on the user's Telegram screen
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ callback_query_id: callback_query.id })
-    });
-
-    // Send a loading message or directly fetch the news
-    await sendCategoryNews(chatId, category);
-  }
-});
-
-// Helper Function: Sends the interactive category buttons
-async function sendGenreMenu(chatId) {
-  const keyboard = {
-    inline_keyboard: Object.entries(GENRES).map(([key, label]) => [
-      { text: label, callback_data: key }
-    ])
-  };
-
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: "Select a genre below to see the latest headlines:",
-      reply_markup: keyboard
-    })
-  });
-}
-
-// Helper Function: Fetches news and prints it out dynamically
-// Hardened helper function to handle category news safely via HTML
-async function sendCategoryNews(chatId, category) {
-  try {
-    const newsRes = await fetch(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&category=${category}&language=en`);
-    const data = await newsRes.json();
-
-    // 1. Safe check if results exist and have items
-    if (!data || !data.results || data.results.length === 0) {
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: `• No recent headlines found for this category right now.`
-        })
-      });
-      return;
-    }
-
-    // 2. Build the message clean using HTML formatting (much safer than Markdown)
-    let textMessage = `<b>🔥 Top Headlines in ${GENRES[category] || category}</b>\n\n`;
-    
-    data.results.slice(0, 5).forEach((article, index) => {
-      // Clean up the title to prevent basic HTML breaks
-      const cleanTitle = article.title.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      textMessage += `${index + 1}. <a href="${article.link}">${cleanTitle}</a>\n\n`;
-    });
-
-    // 3. Send via HTML parse mode
-    const telegramRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: textMessage,
-        parse_mode: "HTML",
-        disable_web_page_preview: true
-      })
-    });
-
-    const telegramData = await telegramRes.json();
-    if (!telegramData.ok) {
-      console.error("Telegram API rejection payload:", telegramData);
-    }
-
-  } catch (err) {
-    console.error("Critical error in sendCategoryNews process:", err);
-  }
-}
