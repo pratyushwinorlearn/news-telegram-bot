@@ -1,0 +1,116 @@
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import fetch from "node-fetch";
+import cron from "node-cron";
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+
+const PORT = process.env.PORT || 3001;
+const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY;
+
+if (!NEWSDATA_API_KEY) {
+  console.error(
+    "Missing NEWSDATA_API_KEY. Copy server/.env.example to server/.env and add your real key."
+  );
+  process.exit(1);
+}
+
+// Simple in-memory cache so multiple desk members hitting the same category
+// within a few minutes don't each burn a separate NewsData.io request.
+const cache = new Map(); // key: `${category}:${page||''}` -> { data, fetchedAt }
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Fetches one category page from NewsData.io, with caching. Used both by the
+ * /api/news route (for the dashboard) and the Telegram digest job (below).
+ */
+export async function fetchNewsCategory(category, page = null) {
+  const cacheKey = `${category}:${page || ""}`;
+  const cached = cache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const params = new URLSearchParams({
+    apikey: NEWSDATA_API_KEY,
+    country: "in",
+    category,
+    language: "en"
+  });
+  if (page) params.set("page", page);
+
+  const upstreamUrl = `https://newsdata.io/api/1/latest?${params.toString()}`;
+  const upstreamRes = await fetch(upstreamUrl);
+  const data = await upstreamRes.json();
+
+  if (data.status !== "success") {
+    throw new Error(data.results?.message || data.message || "NewsData.io returned an error");
+  }
+
+  const payload = {
+    results: data.results || [],
+    nextPage: data.nextPage || null,
+    totalResults: data.totalResults || 0
+  };
+
+  cache.set(cacheKey, { data: payload, fetchedAt: Date.now() });
+  return payload;
+}
+
+/**
+ * GET /api/news?category=politics&page=<nextPage token, optional>
+ *
+ * The frontend never sees the NewsData.io key — this server holds it via
+ * process.env.NEWSDATA_API_KEY (loaded from server/.env, which is gitignored)
+ * and is the only thing that talks to newsdata.io directly.
+ */
+app.get("/api/news", async (req, res) => {
+  const { category, page } = req.query;
+
+  if (!category) {
+    return res.status(400).json({ error: "Missing required 'category' query param" });
+  }
+
+  try {
+    const payload = await fetchNewsCategory(category, page);
+    res.json(payload);
+  } catch (err) {
+    console.error("Error fetching from NewsData.io:", err.message);
+    res.status(502).json({ error: err.message || "Failed to fetch news from upstream provider" });
+  }
+});
+
+app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+// Manual trigger — useful for testing the digest without waiting for the
+// scheduled time, or for a "send now" button later if you want one.
+app.post("/api/digest/send-now", async (req, res) => {
+  const { sendDailyDigest } = await import("./telegram.js");
+  const result = await sendDailyDigest();
+  res.status(result.ok ? 200 : 502).json(result);
+});
+
+// Scheduled digest — runs automatically, no one needs to click anything.
+// Default: every day at 8:00 AM IST. Change the cron expression in .env
+// (DIGEST_CRON_SCHEDULE) if the desk wants a different time.
+const DIGEST_CRON_SCHEDULE = process.env.DIGEST_CRON_SCHEDULE || "0 8 * * *";
+if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+  cron.schedule(DIGEST_CRON_SCHEDULE, async () => {
+    console.log("Running scheduled Telegram digest...");
+    const { sendDailyDigest } = await import("./telegram.js");
+    await sendDailyDigest();
+  }, { timezone: "Asia/Kolkata" });
+  console.log(`Telegram digest scheduled: "${DIGEST_CRON_SCHEDULE}" (Asia/Kolkata)`);
+} else {
+  console.log(
+    "Telegram not configured (missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — automatic digest disabled."
+  );
+}
+
+app.listen(PORT, () => {
+  console.log(`OSINT news server running on http://localhost:${PORT}`);
+});

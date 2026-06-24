@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OSINT desk — India news board</title>
+</head>
+<body>
+
+<header>
+  <div class="masthead">OSINT DESK <span>//</span> INDIA NEWS BOARD</div>
+  <div class="meta-line" id="clock-line">—</div>
+</header>
+
+<nav id="tab-row">
+  <button class="tab active" data-cat="politics">Politics & national</button>
+  <button class="tab" data-cat="business">Business</button>
+  <button class="tab" data-cat="technology">Tech</button>
+  <button class="tab" data-cat="sports">Sports</button>
+  <button class="tab" data-cat="entertainment">Entertainment</button>
+  <button class="tab" data-cat="health">Health</button>
+  <button class="tab" data-cat="crime">Crime</button>
+  <button class="tab" data-cat="world">World & regional</button>
+</nav>
+
+<main>
+  <div class="status-line">
+    <span id="status-text">Loading politics & national…</span>
+    <button class="refresh-btn" id="refresh-btn">Refresh</button>
+  </div>
+  <div class="article-list" id="article-list"></div>
+  <div class="load-more-row" id="load-more-row" style="display:none;">
+    <button class="refresh-btn" id="load-more-btn">Load more</button>
+  </div>
+</main>
+
+<footer>
+  Pulled live from NewsData.io · India · latest news, refresh anytime
+</footer>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
