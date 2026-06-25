@@ -33,6 +33,16 @@ if (!NEWSDATA_API_KEY) {
 const INDIA_ANCHOR_TERMS =
   '(India OR Indian OR Delhi OR Mumbai OR Bengaluru OR Chennai OR Kolkata OR Hyderabad)';
 
+// "ai" has no native NewsData.io category (their real list is business,
+// crime, domestic, education, entertainment, environment, food, health,
+// lifestyle, other, politics, science, sports, technology, top, tourism,
+// world — no "ai"), so it's targeted via qInTitle instead, same idea as
+// "regional". Since qInTitle can only hold ~100 chars, this uses the AI
+// terms here and relies on country=in (not qInTitle) for India relevance —
+// combining both AI and India terms in one field would be too cramped.
+const AI_ANCHOR_TERMS =
+  '(AI OR "artificial intelligence" OR ChatGPT OR "machine learning")';
+
 // "regional" has no real NewsData.io category — it's targeted via the
 // region param (Indian states) instead, with no category param at all,
 // since NewsData's actual "world" category means international by
@@ -46,9 +56,11 @@ const GENRES = {
   politics: "🏛️ Politics & National",
   business: "💼 Business",
   technology: "💻 Tech & Gadgets",
+  ai: "🤖 AI News",
   sports: "⚽ Sports",
   entertainment: "🎬 Entertainment",
   health: "🏥 Health",
+  crime: "🚨 Crime",
   regional: "📍 Regional (India)"
 };
 
@@ -69,17 +81,25 @@ export async function fetchNewsCategory(category, page = null) {
   const params = new URLSearchParams({
     apikey: NEWSDATA_API_KEY,
     country: "in",
-    language: "en",
-    qInTitle: INDIA_ANCHOR_TERMS
+    language: "en"
   });
   if (page) params.set("page", page);
 
   if (category === "regional") {
     // No category param here on purpose — NewsData's "world" category means
     // international by definition, which is exactly what caused this bug.
+    params.set("qInTitle", INDIA_ANCHOR_TERMS);
     params.set("region", CATEGORY_REGIONS.regional);
+  } else if (category === "ai") {
+    // No native "ai" category exists — qInTitle carries the AI terms here
+    // instead of the India terms (country=in already scopes this to India).
+    params.set("qInTitle", AI_ANCHOR_TERMS);
   } else {
+    // Real native categories (politics, business, technology, sports,
+    // entertainment, health, crime, ...) — India relevance comes from both
+    // country=in and the India anchor terms together.
     params.set("category", category);
+    params.set("qInTitle", INDIA_ANCHOR_TERMS);
   }
 
   const upstreamUrl = `https://newsdata.io/api/1/latest?${params.toString()}`;
