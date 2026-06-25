@@ -22,6 +22,21 @@ if (!NEWSDATA_API_KEY) {
   process.exit(1);
 }
 
+// country=in alone isn't a strict filter — NewsData.io can still surface
+// globally-relevant English stories (US politics, US business news, etc.)
+// that happen to appear in Indian-source feeds. qInTitle anchors results to
+// ones that actually mention India or a major Indian city in the headline.
+const INDIA_ANCHOR_TERMS =
+  '(India OR Indian OR Bharat OR Modi OR Delhi OR Mumbai OR Bengaluru OR Chennai OR Kolkata OR Hyderabad OR Pune)';
+
+// "regional" has no real NewsData.io category — it's targeted via the
+// region param (Indian states) instead, with no category param at all,
+// since NewsData's actual "world" category means international by
+// definition and is exactly what was leaking non-Indian news through.
+const CATEGORY_REGIONS = {
+  regional: "Maharashtra,Delhi,Karnataka,Tamil Nadu,Uttar Pradesh"
+};
+
 // Global category mapping for Telegram interactive menus
 const GENRES = {
   politics: "🏛️ Politics & National",
@@ -30,7 +45,7 @@ const GENRES = {
   sports: "⚽ Sports",
   entertainment: "🎬 Entertainment",
   health: "🏥 Health",
-  world: "🌐 World News"
+  regional: "📍 Regional (India)"
 };
 
 // Simple in-memory cache to prevent burning up upstream API limits
@@ -50,10 +65,18 @@ export async function fetchNewsCategory(category, page = null) {
   const params = new URLSearchParams({
     apikey: NEWSDATA_API_KEY,
     country: "in",
-    category,
-    language: "en"
+    language: "en",
+    qInTitle: INDIA_ANCHOR_TERMS
   });
   if (page) params.set("page", page);
+
+  if (category === "regional") {
+    // No category param here on purpose — NewsData's "world" category means
+    // international by definition, which is exactly what caused this bug.
+    params.set("region", CATEGORY_REGIONS.regional);
+  } else {
+    params.set("category", category);
+  }
 
   const upstreamUrl = `https://newsdata.io/api/1/latest?${params.toString()}`;
   const upstreamRes = await fetch(upstreamUrl);
@@ -170,8 +193,12 @@ async function sendGenreMenu(chatId) {
 // Helper Function: Fetches news and prints it out dynamically via safe HTML format
 async function sendCategoryNews(chatId, category) {
   try {
-    const newsRes = await fetch(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&category=${category}&language=en`);
-    const data = await newsRes.json();
+    // Route through the shared fetchNewsCategory function instead of calling
+    // NewsData.io directly here — this was the actual cause of international
+    // stories leaking through in the interactive bot flow: this function
+    // used to bypass India-anchoring/region filtering entirely and hit a
+    // different (incorrect) endpoint with no qInTitle/region params at all.
+    const data = await fetchNewsCategory(category);
 
     if (!data || !data.results || data.results.length === 0) {
       await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -186,7 +213,7 @@ async function sendCategoryNews(chatId, category) {
     }
 
     let textMessage = `<b>🔥 Top Headlines in ${GENRES[category] || category}</b>\n\n`;
-    
+
     data.results.slice(0, 5).forEach((article, index) => {
       const cleanTitle = article.title.replace(/</g, "&lt;").replace(/>/g, "&gt;");
       textMessage += `${index + 1}. <a href="${article.link}">${cleanTitle}</a>\n\n`;

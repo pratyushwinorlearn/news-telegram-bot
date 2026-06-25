@@ -12,7 +12,7 @@ const CATEGORY_LABELS = {
   entertainment: "Entertainment",
   health: "Health",
   crime: "Crime",
-  world: "World & regional"
+  world: "Regional"
 };
 
 // Telegram messages are capped at 4096 characters — keep digests well under
