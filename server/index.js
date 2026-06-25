@@ -26,8 +26,12 @@ if (!NEWSDATA_API_KEY) {
 // globally-relevant English stories (US politics, US business news, etc.)
 // that happen to appear in Indian-source feeds. qInTitle anchors results to
 // ones that actually mention India or a major Indian city in the headline.
+//
+// IMPORTANT: NewsData.io caps qInTitle at 100 characters total — a longer
+// string fails EVERY request with "Query length cannot be greater than 100"
+// (this previously broke all 7 categories, not just one). Keep this short.
 const INDIA_ANCHOR_TERMS =
-  '(India OR Indian OR Bharat OR Modi OR Delhi OR Mumbai OR Bengaluru OR Chennai OR Kolkata OR Hyderabad OR Pune)';
+  '(India OR Indian OR Delhi OR Mumbai OR Bengaluru OR Chennai OR Kolkata OR Hyderabad)';
 
 // "regional" has no real NewsData.io category — it's targeted via the
 // region param (Indian states) instead, with no category param at all,
