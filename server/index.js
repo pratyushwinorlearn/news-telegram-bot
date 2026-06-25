@@ -68,6 +68,19 @@ const GENRES = {
 const cache = new Map(); 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Tracks, per chat + category, how far a person has paged through results —
+// so clicking the same genre button again shows the NEXT 5 headlines instead
+// of repeating the same 5. Keyed by `${chatId}:${category}`.
+// Shape: { articles: [...all fetched so far], offset: number, nextPage: token|null }
+const chatPaginationState = new Map();
+
+// Tracks, per chat + category, which article index the user is currently on
+// and the full article list fetched so far. Lets repeat clicks on the same
+// button show the NEXT batch of headlines instead of repeating the same 5 —
+// without this, two clicks within the 5-minute cache window returned an
+// identical message (the original bug report).
+const userPagination = new Map(); // key: `${chatId}:${category}` -> { articles: [], offset: 0, nextPage: string|null }
+
 /**
  * Fetches one category page from NewsData.io, with caching.
  */
@@ -217,14 +230,30 @@ async function sendGenreMenu(chatId) {
 // Helper Function: Fetches news and prints it out dynamically via safe HTML format
 async function sendCategoryNews(chatId, category) {
   try {
-    // Route through the shared fetchNewsCategory function instead of calling
-    // NewsData.io directly here — this was the actual cause of international
-    // stories leaking through in the interactive bot flow: this function
-    // used to bypass India-anchoring/region filtering entirely and hit a
-    // different (incorrect) endpoint with no qInTitle/region params at all.
-    const data = await fetchNewsCategory(category);
+    const stateKey = `${chatId}:${category}`;
+    let state = chatPaginationState.get(stateKey);
 
-    if (!data || !data.results || data.results.length === 0) {
+    // First click on this category for this chat — fetch fresh and start at 0.
+    if (!state) {
+      const data = await fetchNewsCategory(category);
+      state = { articles: data.results || [], offset: 0, nextPage: data.nextPage || null };
+      chatPaginationState.set(stateKey, state);
+    } else if (state.offset >= state.articles.length) {
+      // Ran out of already-fetched articles — get the next NewsData.io page
+      // using its nextPage cursor, if one exists. If not, loop back to the
+      // start rather than showing nothing on the next click.
+      if (state.nextPage) {
+        const data = await fetchNewsCategory(category, state.nextPage);
+        state.articles = state.articles.concat(data.results || []);
+        state.nextPage = data.nextPage || null;
+      } else {
+        state.offset = 0; // no more pages upstream — restart from the top
+      }
+    }
+
+    const batch = state.articles.slice(state.offset, state.offset + 5);
+
+    if (batch.length === 0) {
       await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -238,10 +267,14 @@ async function sendCategoryNews(chatId, category) {
 
     let textMessage = `<b>🔥 Top Headlines in ${GENRES[category] || category}</b>\n\n`;
 
-    data.results.slice(0, 5).forEach((article, index) => {
+    batch.forEach((article, index) => {
       const cleanTitle = article.title.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      textMessage += `${index + 1}. <a href="${article.link}">${cleanTitle}</a>\n\n`;
+      textMessage += `${state.offset + index + 1}. <a href="${article.link}">${cleanTitle}</a>\n\n`;
     });
+
+    // Advance the offset so the NEXT click on this same category/chat shows
+    // the next batch instead of repeating this one.
+    state.offset += 5;
 
     const telegramRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
